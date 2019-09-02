@@ -2,130 +2,144 @@ from threading import Thread
 from queue import Queue, Empty
 
 import requests
+import sqlite3
 import pickle
 import signal
 import parse
 import time
+import db
 
-# This class handles SIGTERM and tells the program it's time to quit
+
 class ThreadKiller:
+    """This class handles SIGTERM and tells the program it's time to quit"""
     kill_now = False
     def __init__(self):
         signal.signal(signal.SIGINT, self.exit_gracefully)
         signal.signal(signal.SIGTERM, self.exit_gracefully)
     
     def exit_gracefully(self, signum, frame):
-        print("\nQuitting now")
+        print("\nQuitting now...")
         self.kill_now = True
 
 
-# This builds an instance of the hyperlink dictionary when it's needed
-def build_hyperlink_dict(href, title):
-    return {
-        'href': href,
-        'title': title,
-        'is_wikipedia': href[:2] == "./",
-        'references': [],
-        'referenced_by': [],
-        'scanned': False
-    }
-
-
-# This function is what the worker threads execute. Essentially it's responsible for pulling an item 
-# from the queue, getting the webpage, and processing it
-def worker(q, links, pages, killer):
+def fetch_worker(fetch_q: Queue, db_q: Queue, killer: ThreadKiller):
+    """This is the worker function executed by threads that are responsible for fetching webpage data from Wikipedia"""
     while True:
-        # If the program has received SIGTERM
         if killer.kill_now:
-            # empty the queue and quit once done
-            # NOTE: this can take some time if there are several million items in the queue
-            try:
-                q.get(timeout=2)
-            except Empty:
-                return
-            
-            q.task_done()
-            continue
+            return
+
+        href = fetch_q.get()
+        db_q.put({
+            'from': href,
+            'links': parse.get_hyperlinks(href)
+        })
+        fetch_q.task_done()
+
+
+def db_worker(fetch_q: Queue, db_q: Queue, dbname: str, stats: dict, killer: ThreadKiller):
+    """This is the worker function that's responsible for storing results to the local database"""
+    conn = sqlite3.connect(dbname)
+    conn.execute('PRAGMA foreign_keys=1')
+    while True:
+        if killer.kill_now:
+            return
+
+        c = conn.cursor()
+        ld = db_q.get() # ld = link data (see fetch_worker for format)
+
+        print('processing %s: %s total links' % (ld['from'], len(ld['links'])))
+
+        # Mark webpage as scanned
+        db.scan_webpage(c, ld['from'])
+        stats['pages'] += 1
+
+        for link in ld['links']:
+            # Attempt to add link to db (will fail when the webpage has never been seen before)
+            if not db.add_link(c, ld['from'], link['href']):
+                # If we failed, it's because the page does not yet exist in the database
+                # Inform the fetch workers that the page needs to be fetched if it belongs to wikipedia
+                if link['href'][:2] == "./":
+                    fetch_q.put(link['href'])
+
+                # Add page, then link, to database
+                db.add_page(c, link['href'], link['title'])
+                db.add_link(c, ld['from'], link['href'])
+                stats['links'] += 1
+
+        conn.commit()
+        db_q.task_done()
         
-        # Get the next item in the queue and save the links from the page
-        # (q.get blocks until an object in the queue is available for processing. 
-        #   This prevents the loop from cycling endlessly when the queue is empty)
-        link = q.get()
-        pages[0] += 1
-        print("(links: %s, pages: %s, ratio: %.5f) Saving links for %s " % (len(links), pages[0], (pages[0]/(len(links)+1)), link['title']))
-        save_links(q, link, links)
 
-        q.task_done()
+if __name__ == '__main__':
+    # Step 1: initialize the queues
 
+    # The fetch queue stores a list of webpages which need to be scanned
+    # This queue is initially populated by the main thread to kick things off, then becomes populated by the database queue after the crawler gets going
+    fetch_q = Queue(maxsize=0)
 
+    # The database queue stores a list of webpage data which needs to be saved to the database
+    # This queue is populated by the fetch queue
+    db_q = Queue(maxsize=0)
 
-# Scans a wikipedia page for hyperlinks and adds new links to the processing queue if necessary
-def save_links(q, link, links):
-    if not link['is_wikipedia'] or link['scanned']:
-        return
+    num_fetch_threads = 8 # Increase as needed, the db_thread will likely be a bottleneck :(
+    num_db_threads = 1 # Keep at 1 for now
+    dbname = 'links.sqlite' # Update to change database name
 
-    new_links = parse.get_hyperlinks(link)
-    for nl in new_links:
-        if links.get(nl['href']):
-            hyper = links[nl['href']]
-        else:
-            hyper = build_hyperlink_dict(nl['href'], nl['title'])
-            links[nl['href']] = hyper
-            if hyper['is_wikipedia']:
-                q.put(hyper)
-        
-        # Add links between objects
-        hyper['referenced_by'].append(link['href'])
-        link['references'].append(hyper['href'])
-        
-
-
-if __name__ == "__main__":
-    # Initialize the Queue
-    q = Queue(maxsize=0)
-    links = {}
-    num_threads = 20
-    pages = [0] # Need to pass in a list bc ints are immutable and won't exist in shared memory :/
+    conn = sqlite3.connect(dbname)
+    c = conn.cursor()
+    stats = {
+        'links': 0,
+        'pages': 0
+    }
     killer = ThreadKiller()
 
+    # Initialize DB
+    db.init_sqlite(c)
 
-    # Attempt to load data from an existing save file if necessary
-    # Note: long-term success of this project on computers that don't have tons of RAM will require saving to a database here
-    # TODO: save data to sqlite DB instead of storing in memory
-    print('Checking for existing save file')
+    # Step 2: Attempt to load a list of unscanned webpages or start with the "Philosophy" page
+    print('Checking for unscanned webpages')
+    unscanned = db.get_unscanned_pages(conn)
 
-    # Attempt to load an existing save file (if you started running this program in the past but it had to be interrupted for some reason)
-    try:
-        save_file = open('links.p')
-        links = pickle.load(open('links.p', 'rb'))
+    if unscanned:
+        print('Adding unscanned pages to processing queue')
+        # Add unscanned pages to processing queue (useful if resuming scan from a previous run)
+        for href in unscanned:
+            fetch_q.put(href)
 
-        print("Save file found with %s links, loading in data" % len(links))
-        for href, obj_dict in links.items():
-            if not links[href]['scanned'] and links[href]['is_wikipedia']:
-                q.put(links[href])
-            else:
-                pages[0] += 1
-    except Exception:
-        print("No valid save file, starting from beginning")
-        q.put(build_hyperlink_dict("./Philosophy", "Philosophy"))
+        # Update stats
+        stats = db.get_stats(conn)
 
+    else:
+        db.add_page(c, './Philosophy', 'Philosophy')
+        conn.commit()
+        fetch_q.put('./Philosophy')
+        
 
-    # Initialize all the threads, which will block until something gets added to the queue
-    print('Kicking off threads')
-    for i in range(num_threads):
-        t = Thread(target=worker, args=(q, links, pages, killer))
+    # step 3: Initialize worker threads
+
+    # Initialize fetch threads
+    print('Kicking off fetch threads')
+    for i in range(num_fetch_threads):
+        t = Thread(target=fetch_worker, args=(fetch_q, db_q, killer))
         t.setDaemon(True)
         t.start()
 
-    # Wait until every item in the queue has had q.task_done for it 
-    # (if we attempt to quit the program early it will empty out the queue)
-    q.join()
+    # Initialize db threads
+    print('Kicking off db threads')
+    for i in range(num_db_threads):
+        t = Thread(target=db_worker, args=(fetch_q, db_q, dbname, stats, killer))
+        t.setDaemon(True)
+        t.start()
 
-    print("Total links:")
-    print(len(links))
-    print("Total pages:")
-    print(pages[0])
 
-    print("Saving results to file")
+    # Step 4: Block main thread until killed or we're completely done processing
+    while (not killer.kill_now) or (fetch_q.empty() and db_q.empty()):
+        time.sleep(2)
 
-    pickle.dump(links, open('links.p', 'wb'))
+    stats = db.get_stats(conn)
+
+    print('Total links discovered:')
+    print(stats['links'])
+    print('Total pages processed:')
+    print(stats['pages'])
+    conn.close()
