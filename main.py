@@ -40,6 +40,7 @@ def db_worker(fetch_q: Queue, db_q: Queue, dbname: str, stats: dict, killer: Thr
     """This is the worker function that's responsible for storing results to the local database"""
     conn = sqlite3.connect(dbname)
     conn.execute('PRAGMA foreign_keys=1')
+    c = conn.cursor()
 
     start = datetime.datetime.now()
     one_sec = datetime.timedelta(seconds=1)
@@ -48,7 +49,6 @@ def db_worker(fetch_q: Queue, db_q: Queue, dbname: str, stats: dict, killer: Thr
             conn.commit()
             return
 
-        c = conn.cursor()
         ld = db_q.get() # ld = link data (see fetch_worker for format)
 
         # Mark webpage as scanned
