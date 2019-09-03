@@ -18,7 +18,7 @@ class ThreadKiller:
         signal.signal(signal.SIGTERM, self.exit_gracefully)
     
     def exit_gracefully(self, signum, frame):
-        print("\nQuitting now... this may take a bit")
+        print("\nQuitting now...")
         self.kill_now = True
 
 
@@ -69,11 +69,11 @@ def db_worker(fetch_q: Queue, db_q: Queue, dbname: str, stats: dict, killer: Thr
                 # Add page, then link, to database
                 db.add_page(c, link['href'], link['title'])
                 db.add_link(c, ld['from'], link['href'])
-                stats['links'] += 1
+            stats['links'] += 1
         
         if datetime.datetime.now() - start > one_sec:
             # commit once every second
-            print("%s pages scanned, %s total links." % (stats['pages'], stats['links']))
+            print("%s pages scanned, %s total links. fq: %s, dbq: %s" % (stats['pages'], stats['links'], fetch_q.qsize(), db_q.qsize()))
             start = datetime.datetime.now()
             conn.commit()
 
@@ -149,26 +149,19 @@ if __name__ == '__main__':
     # Step 4: Block main thread until killed or we're completely done processing
     # also monitor the fetch queue and adjust the number of queue workers accordingly
     while (not killer.kill_now) or (fetch_q.empty() and db_q.empty()):
-        time.sleep(3)
         size = db_q.qsize()
 
-        if size > 10000 and len(fetch_threads):
+        if size > 2000 and len(fetch_threads):
             t, t_kill = fetch_threads.pop()
             print("Fetch queue too large, stopping a fetch worker. Total threads: %s" % len(fetch_threads))
             t_kill[0] = True
-        elif size < 1000 and len(fetch_threads) < max_fetch_threads:
+        elif size < 100 and len(fetch_threads) < max_fetch_threads:
             print("Fetch queue too small, starting a fetch worker. Total threads: %s" % len(fetch_threads))
             t_kill = [False]
             t = Thread(target=fetch_worker, args=(fetch_q, db_q, killer, t_kill))
             t.setDaemon(True)
             t.start()
             fetch_threads.append((t, t_kill))
+        time.sleep(3)
 
-
-    stats = db.get_stats(conn)
-
-    print('Total links discovered:')
-    print(stats['links'])
-    print('Total pages processed:')
-    print(stats['pages'])
     conn.close()
