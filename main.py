@@ -18,14 +18,14 @@ class ThreadKiller:
         signal.signal(signal.SIGTERM, self.exit_gracefully)
     
     def exit_gracefully(self, signum, frame):
-        print("\nQuitting now...")
+        print("\nQuitting now... this may take a bit")
         self.kill_now = True
 
 
-def fetch_worker(fetch_q: Queue, db_q: Queue, killer: ThreadKiller):
+def fetch_worker(fetch_q: Queue, db_q: Queue, killer: ThreadKiller, t_kill: list):
     """This is the worker function executed by threads that are responsible for fetching webpage data from Wikipedia"""
     while True:
-        if killer.kill_now:
+        if killer.kill_now or t_kill[0]:
             return
 
         href = fetch_q.get()
@@ -88,7 +88,8 @@ if __name__ == '__main__':
     # This queue is populated by the fetch queue
     db_q = Queue(maxsize=0)
 
-    num_fetch_threads = 20 # Increase as needed, the db_thread will likely be a bottleneck :(
+    num_fetch_threads = 20
+    max_fetch_threads = 40
     num_db_threads = 1 # Keep at 1 for now
     dbname = 'links.sqlite' # Update to change database name
 
@@ -126,10 +127,13 @@ if __name__ == '__main__':
 
     # Initialize fetch threads
     print('Kicking off fetch threads')
+    fetch_threads = []
     for i in range(num_fetch_threads):
-        t = Thread(target=fetch_worker, args=(fetch_q, db_q, killer))
+        t_kill = [False]
+        t = Thread(target=fetch_worker, args=(fetch_q, db_q, killer, t_kill))
         t.setDaemon(True)
         t.start()
+        fetch_threads.append((t, t_kill))
 
     # Initialize db threads
     print('Kicking off db threads')
@@ -140,8 +144,23 @@ if __name__ == '__main__':
 
 
     # Step 4: Block main thread until killed or we're completely done processing
+    # also monitor the fetch queue and adjust the number of queue workers accordingly
     while (not killer.kill_now) or (fetch_q.empty() and db_q.empty()):
-        time.sleep(2)
+        time.sleep(3)
+        size = db_q.qsize()
+
+        if size > 10000 and len(fetch_threads):
+            t, t_kill = fetch_threads.pop()
+            print("Fetch queue too large, stopping a fetch worker. Total threads: %s" % len(fetch_threads))
+            t_kill[0] = True
+        elif size < 1000 and len(fetch_threads) < max_fetch_threads:
+            print("Fetch queue too small, starting a fetch worker. Total threads: %s" % len(fetch_threads))
+            t_kill = [False]
+            t = Thread(target=fetch_worker, args=(fetch_q, db_q, killer, t_kill))
+            t.setDaemon(True)
+            t.start()
+            fetch_threads.append((t, t_kill))
+
 
     stats = db.get_stats(conn)
 
