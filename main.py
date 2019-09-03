@@ -56,12 +56,15 @@ def db_worker(fetch_q: Queue, db_q: Queue, dbname: str, stats: dict, killer: Thr
         stats['pages'] += 1
 
         for link in ld['links']:
+            # Skip links we don't care about
+            if any([link['href'][:2] != "./", "#cite" in link['href'], "./Special:BookSources" in link['href']]):
+                continue
+            
             # Attempt to add link to db (will fail when the webpage has never been seen before)
             if not db.add_link(c, ld['from'], link['href']):
                 # If we failed, it's because the page does not yet exist in the database
                 # Inform the fetch workers that the page needs to be fetched if it belongs to wikipedia
-                if all([link['href'][:2] == "./", not "#cite" in link['href'], not "./Special:BookSources" in link['href']]):
-                    fetch_q.put(link['href'])
+                fetch_q.put(link['href'])
 
                 # Add page, then link, to database
                 db.add_page(c, link['href'], link['title'])
