@@ -11,7 +11,12 @@ def get_href_content(href):
         else:
             return False
 
-        res = requests.get(full_url)
+        try:
+            res = requests.get(full_url)
+        except Exception:
+            print("Request for %s failed" % href)
+            return False
+
         if not res.content:
             return False
         else:
