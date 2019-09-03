@@ -12,7 +12,7 @@ the links between all webpages in English Wikipedia.
 
 ## Architecture
 
-The main system is composed of two queues, the 'fetch queue' and the 'database queue'. Each queue has a set of threads which are responsible for processing their items. These threads generally take items from their own queue, then add items to the other queue.
+The main system is composed of two queues, the 'fetch queue' and the 'database queue'. Each queue has a set of threads which are responsible for processing their items. These threads generally take items from their own queue, then add items to the other queue for processing.
 
 ### The Fetch Queue
 
