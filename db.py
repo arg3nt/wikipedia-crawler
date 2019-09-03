@@ -70,6 +70,6 @@ def get_stats(conn: sqlite3.Connection):
 # Get a comprehensive list of unscanned webpages
 def get_unscanned_pages(conn: sqlite3.Connection):
     c = conn.cursor()
-    rows = c.execute('''SELECT href FROM page WHERE scanned=0''')
+    rows = c.execute('''SELECT href FROM page WHERE scanned=0 AND is_wikipedia=1''')
 
     return [r[0] for r in rows]

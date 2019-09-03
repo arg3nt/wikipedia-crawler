@@ -1,9 +1,9 @@
 from threading import Thread
 from queue import Queue, Empty
 
+import datetime
 import requests
 import sqlite3
-import pickle
 import signal
 import parse
 import time
@@ -40,14 +40,16 @@ def db_worker(fetch_q: Queue, db_q: Queue, dbname: str, stats: dict, killer: Thr
     """This is the worker function that's responsible for storing results to the local database"""
     conn = sqlite3.connect(dbname)
     conn.execute('PRAGMA foreign_keys=1')
+
+    start = datetime.datetime.now()
+    one_sec = datetime.timedelta(seconds=1)
     while True:
         if killer.kill_now:
+            conn.commit()
             return
 
         c = conn.cursor()
         ld = db_q.get() # ld = link data (see fetch_worker for format)
-
-        print('processing %s: %s total links' % (ld['from'], len(ld['links'])))
 
         # Mark webpage as scanned
         db.scan_webpage(c, ld['from'])
@@ -58,15 +60,20 @@ def db_worker(fetch_q: Queue, db_q: Queue, dbname: str, stats: dict, killer: Thr
             if not db.add_link(c, ld['from'], link['href']):
                 # If we failed, it's because the page does not yet exist in the database
                 # Inform the fetch workers that the page needs to be fetched if it belongs to wikipedia
-                if link['href'][:2] == "./":
+                if all([link['href'][:2] == "./", not "#cite" in link['href'], not "./Special:BookSources" in link['href']]):
                     fetch_q.put(link['href'])
 
                 # Add page, then link, to database
                 db.add_page(c, link['href'], link['title'])
                 db.add_link(c, ld['from'], link['href'])
                 stats['links'] += 1
+        
+        if datetime.datetime.now() - start > one_sec:
+            # commit once every second
+            print("%s pages scanned, %s total links." % (stats['pages'], stats['links']))
+            start = datetime.datetime.now()
+            conn.commit()
 
-        conn.commit()
         db_q.task_done()
         
 
@@ -81,7 +88,7 @@ if __name__ == '__main__':
     # This queue is populated by the fetch queue
     db_q = Queue(maxsize=0)
 
-    num_fetch_threads = 8 # Increase as needed, the db_thread will likely be a bottleneck :(
+    num_fetch_threads = 20 # Increase as needed, the db_thread will likely be a bottleneck :(
     num_db_threads = 1 # Keep at 1 for now
     dbname = 'links.sqlite' # Update to change database name
 
