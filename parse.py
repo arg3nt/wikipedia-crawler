@@ -17,7 +17,7 @@ def get_href_content(href):
             print("Request for %s failed" % href)
             return False
 
-        if not res.content:
+        if not res.content or not res.ok:
             return False
         else:
             return str(res.content)

@@ -3,6 +3,10 @@
 A multithreaded python web crawler that mostly uses built-in libraries. Downloads and stores
 the links between all webpages in English Wikipedia.
 
+## Running the program
+
+To run the program, navigate to the root directory of the repo and run `python3 main.py` (note: assuming python3 has been installed)
+
 ## Major libraries used
 
 * [queue](https://docs.python.org/3/library/queue.html)
